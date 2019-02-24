@@ -141,6 +141,7 @@ static const MemMapEntry a15memmap[] = {
     [VIRT_GPIO] =               { 0x09030000, 0x00001000 },
     [VIRT_SECURE_UART] =        { 0x09040000, 0x00001000 },
     [VIRT_SMMU] =               { 0x09050000, 0x00020000 },
+    [VIRT_WD] =                 { 0x09060000, 0x00020000 },
     [VIRT_MMIO] =               { 0x0a000000, 0x00000200 },
     /* ...repeating for a total of NUM_VIRTIO_TRANSPORTS, each of that size */
     [VIRT_PLATFORM_BUS] =       { 0x0c000000, 0x02000000 },
@@ -166,6 +167,7 @@ static const int a15irqmap[] = {
     [VIRT_GIC_V2M] = 48, /* ...to 48 + NUM_GICV2M_SPIS - 1 */
     [VIRT_SMMU] = 74,    /* ...to 74 + NUM_SMMU_IRQS - 1 */
     [VIRT_PLATFORM_BUS] = 112, /* ...to 112 + PLATFORM_BUS_NUM_IRQS -1 */
+    [VIRT_WD] = 176,
 };
 
 static const char *valid_cpus[] = {
@@ -753,6 +755,23 @@ static void virt_powerdown_req(Notifier *n, void *opaque)
 static Notifier virt_system_powerdown_notifier = {
     .notify = virt_powerdown_req
 };
+
+static void create_wd_dummy(const VirtMachineState *vms, qemu_irq *pic)
+{
+    char *nodename;
+    int irq = vms->irqmap[VIRT_WD];
+    hwaddr base = vms->memmap[VIRT_WD].base;
+    hwaddr size = vms->memmap[VIRT_WD].size;
+    const char compat[] = "warpdrive,wd_dummy_v2";
+
+    sysbus_create_simple("wd_dummy_v2", base, pic[irq]);
+
+    nodename = g_strdup_printf("/wd_dummy_v2@%" PRIx64, base);
+    qemu_fdt_add_subnode(vms->fdt, nodename);
+    qemu_fdt_setprop_sized_cells(vms->fdt, nodename, "reg", 2, base, 2, size);
+    qemu_fdt_setprop(vms->fdt, nodename, "compatible", compat, sizeof(compat));
+    g_free(nodename);
+}
 
 static void create_gpio(const VirtMachineState *vms, qemu_irq *pic)
 {
@@ -1548,6 +1567,8 @@ static void machvirt_init(MachineState *machine)
     create_pcie(vms, pic);
 
     create_gpio(vms, pic);
+
+    create_wd_dummy(vms, pic);
 
     /* Create mmio transports, so the user can create virtio backends
      * (which will be automatically plugged in to the transports). If

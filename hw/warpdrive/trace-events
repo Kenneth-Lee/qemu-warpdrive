@@ -1,0 +1,9 @@
+# See docs/devel/tracing.txt for syntax documentation.
+
+# hw/warpdrive/wd_dummy.c
+wd_dummy_v2_read(uint64_t offset) "read offset 0x%" PRIx64
+wd_dummy_v2_write(uint64_t offset, uint64_t value) "write offset 0x%" PRIx64 " 0x%" PRIx64
+wd_dummy_v2_dma_data(unsigned id, uint64_t value); "dma_read(%d): 0x%" PRIx64
+wd_dummy_v2_err(const char *errstr, uint64_t value); "error: %s, 0x%" PRIx64
+wd_dummy_v2_tran(const char *type, uint64_t asid, uint64_t iova, uint64_t pa); "translate addr (type=%s, asid=%" PRIx64 ") %" PRIx64 "=>" PRIx64
+wd_dummy_v2_copy(uint64_t tgt_addr, uint64_t src_addr, size_t size, uint32_t ret); "copy %" PRIx64 " to %" PRIx64 " size=%ld, ret=%d"

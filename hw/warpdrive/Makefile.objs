@@ -1,0 +1,1 @@
+common-obj-y += wd_dummy.o
