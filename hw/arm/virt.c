@@ -765,11 +765,13 @@ static void create_wd_dummy(const VirtMachineState *vms, qemu_irq *pic)
     const char compat[] = "warpdrive,wd_dummy_v2";
 
     sysbus_create_simple("wd_dummy_v2", base, pic[irq]);
-
     nodename = g_strdup_printf("/wd_dummy_v2@%" PRIx64, base);
     qemu_fdt_add_subnode(vms->fdt, nodename);
     qemu_fdt_setprop_sized_cells(vms->fdt, nodename, "reg", 2, base, 2, size);
     qemu_fdt_setprop(vms->fdt, nodename, "compatible", compat, sizeof(compat));
+    qemu_fdt_setprop_cells(vms->fdt, nodename, "interrupts",
+                           GIC_FDT_IRQ_TYPE_SPI, irq,
+                           GIC_FDT_IRQ_FLAGS_LEVEL_HI);
     g_free(nodename);
 }
 

@@ -69,6 +69,7 @@ struct dummy_hw_queue_reg {
  * w2(rw): page table size (write to this for pt validation)
  * w3(rw): flags
  * w4(ro): max copy size (in bytes)
+ * w5(ro): irq reason: 0-2 ring changed, > 10 error
  * from RING_START_ADDR: ring 0-2 data: struct ring_io
  *
  * page 1 - (1+RING_NUM): w0(wo): ring doorbell
@@ -102,6 +103,7 @@ typedef struct WDDummyV2State {
     uint64_t ptsz;
     uint64_t flags;
     uint64_t max_copy_size;
+    uint64_t irq_reason;
     uint32_t tail;
     struct ring_io rio[3];
 
@@ -168,11 +170,16 @@ static uint64_t wd_dummy_v2_read(void *opaque, hwaddr offset,
             return s->flags;
         case 4:
             return MAX_COPY_SIZE;
+        case 5:
+            qemu_set_irq(s->irq, 0);
+            return s->irq_reason;
         }
 
         if (ri < 0 || ri > RING_NUM) {
-                trace_wd_dummy_v2_err("ri out of range", ri);
-                return 0; /* out of ring */
+            s->irq_reason = 14;
+            qemu_set_irq(s->irq, 1);
+            trace_wd_dummy_v2_err("ri out of range", ri);
+            return 0; /* out of ring */
         }
 
         rii = (wi - HEADER_WORDS) - ri * sizeof(struct ring_io);
@@ -184,6 +191,8 @@ static uint64_t wd_dummy_v2_read(void *opaque, hwaddr offset,
         case 2:
             return s->rio[ri].asid;
         default:
+            s->irq_reason = 13;
+            qemu_set_irq(s->irq, 1);
             trace_wd_dummy_v2_err("rii out of range", rii);
             return 0;
         }
@@ -214,6 +223,8 @@ static inline int __do_copy(WDDummyV2State *s, AddressSpace *as, uint64_t va,
                      dma_memory_write(as, pa, buf, csz);
 
         if (ret) {
+            s->irq_reason = 12;
+            qemu_set_irq(s->irq, 1);
             trace_wd_dummy_v2_err2("dummy_wd io error\n", ret, read);
             return -EIO;
         }
@@ -230,6 +241,8 @@ static int _do_copy(WDDummyV2State *s, void *tgt_addr, void *src_addr,
     int ret;
 
     if (size > MAX_COPY_SIZE) {
+        s->irq_reason = 11;
+        qemu_set_irq(s->irq, 1);
         trace_wd_dummy_v2_err2("copy size error\n", size, MAX_COPY_SIZE);
         return -EINVAL;
     }
@@ -252,17 +265,23 @@ static void _doorbell(WDDummyV2State *s, int rid, uint64_t value)
 
     if (s->rio[rid].rbpa == (uint64_t)-1 || !s->rio[rid].rbpa ||
         s->rio[rid].rbsz != Q_BDS) {
+        s->irq_reason = 15;
+        qemu_set_irq(s->irq, 1);
         trace_wd_dummy_v2_err("rbpa not set (db)", s->rio[rid].rbpa);
         return;
     }
 
     ret = dma_memory_read(as, rbpa(s, rid, head), &head, sizeof(head));
     if (ret) {
+        s->irq_reason = 16;
+        qemu_set_irq(s->irq, 1);
         trace_wd_dummy_v2_err("read head", ret);
         return;
     }
 
 	if (head >= Q_BDS) {
+        s->irq_reason = 17;
+        qemu_set_irq(s->irq, 1);
 		trace_wd_dummy_v2_err("dummy_wd io error", head);
 		return;
 	}
@@ -273,6 +292,8 @@ static void _doorbell(WDDummyV2State *s, int rid, uint64_t value)
                 rbpa(s, rid, ring) + s->tail * sizeof(struct ring_bd),
                 &bd, sizeof(bd));
         if (ret) {
+            s->irq_reason = 18;
+            qemu_set_irq(s->irq, 1);
             trace_wd_dummy_v2_err("read bd", ret);
             return;
         }
@@ -288,6 +309,8 @@ static void _doorbell(WDDummyV2State *s, int rid, uint64_t value)
                 rbpa(s, rid, ring) + s->tail * sizeof(struct ring_bd),
                 &bd, sizeof(bd));
         if (ret) {
+            s->irq_reason = 19;
+            qemu_set_irq(s->irq, 1);
             trace_wd_dummy_v2_err("write bd", ret);
             return;
         }
@@ -297,9 +320,12 @@ static void _doorbell(WDDummyV2State *s, int rid, uint64_t value)
 	if (tail != s->tail) {
         ret = dma_memory_write(as, rbpa(s, rid, tail), &s->tail, sizeof(s->tail));
         if (ret) {
+            s->irq_reason = 20;
+            qemu_set_irq(s->irq, 1);
             trace_wd_dummy_v2_err("write bd", ret);
             return;
         }
+        s->irq_reason = rid;
         qemu_set_irq(s->irq, 1);
 	} else
 	    trace_wd_dummy_v2_err2("empty doorbell", head, tail);
@@ -460,6 +486,7 @@ static void wd_dummy_v2_init(Object *obj)
     s->pt = NULL;
     s->tail = 0;
     s->max_copy_size = MAX_COPY_SIZE;
+    s->irq_reason = 10;
 }
 
 static void wd_dummy_v2_realize(DeviceState *dev, Error **errp)
