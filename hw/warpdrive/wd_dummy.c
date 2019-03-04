@@ -416,7 +416,7 @@ static void wd_dummy_v2_init(Object *obj)
     WDDummyV2State *s = OBJECT_CHECK(WDDummyV2State, (obj), TYPE_WD_DUMMY_V2);
 
     memory_region_init_io(&s->iomem, OBJECT(s), &wd_dummy_v2_ops, s,
-		    "wd_dummy_v2", 0x1000);
+		    "wd_dummy_v2", 0xa000);
     sysbus_init_mmio(sbd, &s->iomem);
     sysbus_init_irq(sbd, &s->irq);
 
