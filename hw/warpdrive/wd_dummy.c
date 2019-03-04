@@ -17,6 +17,8 @@
 #define DUMMY_TAG 0x3333444455556666
 #define PAGE_SHIF 12
 #define DMA_PAGESIZE    (1<<PAGE_SHIF)
+#define DMA_PAGEMASK_OFFSET    (DMA_PAGESIZE - 1)
+#define DMA_PAGEMASK_PAGEALIGN (~DMA_PAGEMASK_OFFSET)
 #define MAX_PT_ENTRIES  64
 
 /* every entry refer to a dma page (size=DMA_PAGESIZE) */
@@ -56,7 +58,7 @@ struct dummy_hw_queue_reg {
 
 #define RING_NUM 3
 #define HEADER_WORDS 12 /* reseved words in page 0 */
-#define MAX_COPY_SIZE 1024
+#define MAX_COPY_SIZE 0x4000
 
 /* IO space defintion
  *
@@ -111,18 +113,18 @@ static hwaddr _iommu_translate(WDDummyV2State *s, hwaddr iova)
     int i;
     const char *m = "fail";
     hwaddr pa = 0;
-    uint64_t asid;
-
-    return 0;
+    uint64_t asid = 0;
+    hwaddr iova_align;
 
     if (s->flags & FLAG_PASSTHROUGH) {
         pa = iova;
-        asid = 0;
         m = "passthrough";
     } else {
+        iova_align = iova & DMA_PAGEMASK_PAGEALIGN;
         for (i = 0; i < s->ptsz; i++) {
-            if (s->pt[i].asid != (uint64_t)-1 && s->pt[i].iova == iova) {
-                pa = s->pt[i].pa;
+            //trace_wd_dummy_v2_tran("lookup", s->pt[i].asid, s->pt[i].iova, s->pt[i].pa);
+            if (s->pt[i].asid != (uint64_t)-1 && s->pt[i].iova == iova_align) {
+                pa = s->pt[i].pa + (iova & DMA_PAGEMASK_OFFSET);
                 m = "tran";
                 asid = s->pt[i].asid;
                 break;
@@ -190,6 +192,36 @@ static uint64_t wd_dummy_v2_read(void *opaque, hwaddr offset,
     return 0;
 }
 
+static inline int __do_copy(WDDummyV2State *s, AddressSpace *as, uint64_t va,
+                            char *buf, uint64_t size, int read)
+{
+    uint64_t sz, pa, npa, csz;
+    int ret;
+
+    sz = size;
+    while (sz > 0) {
+        pa = _iommu_translate(s, va);
+        npa = (pa & DMA_PAGEMASK_PAGEALIGN) + DMA_PAGESIZE;
+        csz = npa - pa;
+        if (csz < sz) {
+            ret = dma_memory_read(as, pa, buf, csz);
+            sz -= csz;
+        } else {
+            csz = sz;
+            sz = 0;
+        }
+        ret = read ? dma_memory_read(as, pa, buf, csz) :
+                     dma_memory_write(as, pa, buf, csz);
+
+        if (ret) {
+            trace_wd_dummy_v2_err2("dummy_wd io error\n", ret, read);
+            return -EIO;
+        }
+    }
+
+    return 0;
+}
+
 static int _do_copy(WDDummyV2State *s, void *tgt_addr, void *src_addr,
         uint64_t size)
 {
@@ -197,15 +229,15 @@ static int _do_copy(WDDummyV2State *s, void *tgt_addr, void *src_addr,
     char buf[MAX_COPY_SIZE];
     int ret;
 
-    ret = dma_memory_read(as, _iommu_translate(s, (uint64_t)src_addr), buf, size);
-    ret = dma_memory_write(as, _iommu_translate(s, (uint64_t)tgt_addr), buf, size);
-
-    if (ret) {
-        trace_wd_dummy_v2_err("dummy_wd io error\n", ret);
-        return -EIO;
+    if (size > MAX_COPY_SIZE) {
+        trace_wd_dummy_v2_err2("copy size error\n", size, MAX_COPY_SIZE);
+        return -EINVAL;
     }
 
-    return 0;
+    ret = __do_copy(s, as, (uint64_t)src_addr, buf, size, 1);
+    if (ret)
+        return ret;
+    return __do_copy(s, as, (uint64_t)tgt_addr, buf, size, 1);
 }
 
 #define rbpa(s, rid, member) _iommu_translate(s, (s->rio[rid].rbpa + \
@@ -244,9 +276,10 @@ static void _doorbell(WDDummyV2State *s, int rid, uint64_t value)
             trace_wd_dummy_v2_err("read bd", ret);
             return;
         }
-		if(bd.size > s->max_copy_size)
+		if(bd.size > s->max_copy_size) {
+            trace_wd_dummy_v2_err("read bd", ret);
 			bd.ret = -EINVAL;
-		else
+        } else
 			bd.ret = _do_copy(s, bd.tgt_addr, bd.src_addr, bd.size);
 
         trace_wd_dummy_v2_copy((uint64_t)bd.tgt_addr, (uint64_t)bd.src_addr,
@@ -262,7 +295,6 @@ static void _doorbell(WDDummyV2State *s, int rid, uint64_t value)
 	}
 
 	if (tail != s->tail) {
-		trace_wd_dummy_v2_err("write back tail %d", head);
         ret = dma_memory_write(as, rbpa(s, rid, tail), &s->tail, sizeof(s->tail));
         if (ret) {
             trace_wd_dummy_v2_err("write bd", ret);
@@ -270,7 +302,7 @@ static void _doorbell(WDDummyV2State *s, int rid, uint64_t value)
         }
         qemu_set_irq(s->irq, 1);
 	} else
-	    trace_wd_dummy_v2_err("doorbell with no data", value);
+	    trace_wd_dummy_v2_err2("empty doorbell", head, tail);
 }
 
 static void _set_rb(WDDummyV2State *s, int rid, uint64_t rbsz)
@@ -380,8 +412,10 @@ static void wd_dummy_v2_write(void *opaque, hwaddr offset,
             trace_wd_dummy_v2_err("rii out of range", rii);
             return;
         }
-    } else if (pi-1 < RING_NUM)
+    } else if (pi-1 < RING_NUM) {
         _doorbell(s, pi-1, value);
+        return;
+    }
 
     trace_wd_dummy_v2_err("invalid io write", offset);
 }
@@ -422,9 +456,10 @@ static void wd_dummy_v2_init(Object *obj)
 
     s->ptpa = 0;
     s->ptsz = 0;
-    s->flags = FLAG_PASSTHROUGH;
+    s->flags = 0;
     s->pt = NULL;
     s->tail = 0;
+    s->max_copy_size = MAX_COPY_SIZE;
 }
 
 static void wd_dummy_v2_realize(DeviceState *dev, Error **errp)
