@@ -98,6 +98,7 @@ typedef struct WDDummyV2State {
     SysBusDevice parent_obj;
 
     MemoryRegion iomem;
+    QEMUTimer *timer;
     qemu_irq irq;
     uint64_t ptpa;
     uint64_t ptsz;
@@ -106,7 +107,6 @@ typedef struct WDDummyV2State {
     uint64_t irq_reason;
     uint32_t tail;
     struct ring_io rio[3];
-
     struct pt_entry *pt;
 } WDDummyV2State;
 
@@ -327,8 +327,23 @@ static void _doorbell(WDDummyV2State *s, int rid, uint64_t value)
         }
         s->irq_reason = rid;
         qemu_set_irq(s->irq, 1);
-	} else
+	} else if (value != (uint64_t)-1)
 	    trace_wd_dummy_v2_err2("empty doorbell", head, tail);
+}
+
+static void _update_rb_timer(WDDummyV2State *s)
+{
+    int i, dn;
+
+    for (i=0, dn=0; i<RING_NUM; i++) {
+        if (s->rio[i].rbpa)
+            dn++;
+    }
+
+    if (dn)
+        timer_mod(s->timer, qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) + 500);
+    else
+        timer_del(s->timer);
 }
 
 static void _set_rb(WDDummyV2State *s, int rid, uint64_t rbsz)
@@ -342,6 +357,7 @@ static void _set_rb(WDDummyV2State *s, int rid, uint64_t rbsz)
         s->rio[rid].rbpa = 0;
         s->rio[rid].rbsz = 0;
         s->rio[rid].asid = (uint64_t)-1;
+        _update_rb_timer(s);
         return;
     }
 
@@ -364,6 +380,7 @@ static void _set_rb(WDDummyV2State *s, int rid, uint64_t rbsz)
         return;
     }
     s->rio[rid].rbsz = rbsz;
+    _update_rb_timer(s);
 }
 
 
@@ -470,6 +487,18 @@ static Property wd_dummy_v2_properties[] = {
     DEFINE_PROP_END_OF_LIST(),
 };
 
+static void wd_dummy_v2_timer(void *opaque)
+{
+    WDDummyV2State *s = opaque;
+    int i;
+
+    for (i = 0; i < 3; i++)
+        if (s->rio[i].rbpa != (uint64_t)-1 && s->rio[i].rbpa)
+            _doorbell(s, i, (uint64_t)-1);
+
+    timer_mod(s->timer, qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) + 500);
+}
+
 static void wd_dummy_v2_init(Object *obj)
 {
     SysBusDevice *sbd = SYS_BUS_DEVICE(obj);
@@ -491,6 +520,15 @@ static void wd_dummy_v2_init(Object *obj)
 
 static void wd_dummy_v2_realize(DeviceState *dev, Error **errp)
 {
+    WDDummyV2State *s = OBJECT_CHECK(WDDummyV2State, (dev), TYPE_WD_DUMMY_V2);
+    s->timer = timer_new_ms(QEMU_CLOCK_VIRTUAL, wd_dummy_v2_timer, s);
+}
+
+static void wd_dummy_v2_unrealize(DeviceState *dev, Error **errp)
+{
+    WDDummyV2State *s = OBJECT_CHECK(WDDummyV2State, (dev), TYPE_WD_DUMMY_V2);
+    timer_del(s->timer);
+    timer_free(s->timer);
 }
 
 static void wd_dummy_v2_class_init(ObjectClass *oc, void *data)
@@ -498,6 +536,7 @@ static void wd_dummy_v2_class_init(ObjectClass *oc, void *data)
     DeviceClass *dc = DEVICE_CLASS(oc);
 
     dc->realize = wd_dummy_v2_realize;
+    dc->unrealize = wd_dummy_v2_unrealize;
     dc->vmsd = &wd_dummy_v2_vmsd;
     dc->props = wd_dummy_v2_properties;
 }
